@@ -39,6 +39,9 @@ unsigned long lastDhtMs = 0;
 
 #define BTN_DEBOUNCE_MS       50UL
 unsigned long lastBtnEdgeMs = 0;
+bool lastBtnRaw = HIGH;     
+bool stableBtn  = HIGH;     
+bool prevStable = HIGH;  
 
 #define US_SAMPLE_MS          100UL
 #define US_PULSE_TIMEOUT_US   25000UL
@@ -56,8 +59,8 @@ enum Mode {
 
 Mode mode = MODE_DHT;
 void showModeLeds() {
-    digitalWrite(LED_GREEN_US_PIN,  (mode == MODE_DHT) ? HIGH : LOW);
-    digitalWrite(LED_YELLOW_DHT_PIN, (mode == MODE_ULTRASONIC) ? HIGH : LOW);
+    digitalWrite(LED_YELLOW_DHT_PIN,  (mode == MODE_DHT) ? HIGH : LOW);
+    digitalWrite(LED_GREEN_US_PIN, (mode == MODE_ULTRASONIC) ? HIGH : LOW);
 }
 void allRedOff() {
     digitalWrite(LED_RED_PIN_FAR, LOW);
@@ -88,6 +91,72 @@ long readUltrasonicCM() {
     // cm: speed of sound ~343 m/s => ~29.1 µs per cm round-trip
     return (long)(dur / 29.1 / 2.0);
 }
+void handleSensorReadings(unsigned long currentMillis) {
+    if (mode == MODE_DHT) {
+        readDhtSensor(currentMillis);
+    } 
+    else if (mode == MODE_ULTRASONIC) {
+        readUltrasonicSensor(currentMillis);
+    }
+}
+void readDhtSensor(unsigned long currentMillis) {
+    if (currentMillis - lastDhtMs < DHT_SAMPLE_MS) return;  // wait until next sample
+    lastDhtMs = currentMillis;
+
+    float h = dht.readHumidity();
+    float t = dht.readTemperature(); // °C
+
+    if (isnan(h) || isnan(t)) {
+        Serial.println(F("DHT read failed"));
+        return;
+    }
+
+    Serial.print(F("DHT22 -> T: "));
+    Serial.print(t, 1);
+    Serial.print(F(" °C, H: "));
+    Serial.print(h, 1);
+    Serial.println(F(" %"));
+
+    // Optional: any DHT-specific LED logic here
+    allRedOff();  // keep consistent with your mode behavior
+}
+
+void readUltrasonicSensor(unsigned long currentMillis) {
+    if (currentMillis - lastUsMs < US_SAMPLE_MS) return;  // wait until next sample
+    lastUsMs = currentMillis;
+
+    long cm = readUltrasonicCM();
+
+    if (cm >= 0) {
+        Serial.print(F("Distance: "));
+        Serial.print(cm);
+        Serial.println(F(" cm"));
+    } else {
+        Serial.println(F("Distance: out of range / timeout"));
+    }
+
+    setRedProgress(cm);
+}
+
+void processButtonInput(unsigned long currentMillis) {
+    bool raw = digitalRead(BUTTON_PIN);
+    if (raw != lastBtnRaw) {
+    lastBtnRaw = raw;
+    lastBtnEdgeMs = currentMillis;  // start debounce window
+    }
+    if ((currentMillis - lastBtnEdgeMs) > BTN_DEBOUNCE_MS) {
+    if (stableBtn != raw) {
+        stableBtn = raw;
+        // Falling edge: HIGH -> LOW (button pressed)
+        if (prevStable == HIGH && stableBtn == LOW) {
+        mode = (mode == MODE_DHT) ? MODE_ULTRASONIC : MODE_DHT;
+        showModeLeds();
+        if (mode == MODE_DHT) allRedOff();
+        }
+        prevStable = stableBtn;
+    }
+    }
+}
 
 void setup() {
     Serial.begin(115200);
@@ -113,61 +182,10 @@ void setup() {
     showModeLeds();
 }
 
-
-
-bool lastBtnRaw = HIGH;     
-bool stableBtn  = HIGH;     
-bool prevStable = HIGH;     
-
 void loop() {
     unsigned long currentMillis = millis();
 
     // ---- Debounce button (active LOW) ----
-    bool raw = digitalRead(BUTTON_PIN);
-    if (raw != lastBtnRaw) {
-    lastBtnRaw = raw;
-    lastBtnEdgeMs = currentMillis;  // start debounce window
-    }
-    if ((currentMillis - lastBtnEdgeMs) > BTN_DEBOUNCE_MS) {
-    if (stableBtn != raw) {
-        stableBtn = raw;
-        // Falling edge: HIGH -> LOW (button pressed)
-        if (prevStable == HIGH && stableBtn == LOW) {
-        mode = (mode == MODE_DHT) ? MODE_ULTRASONIC : MODE_DHT;
-        showModeLeds();
-        if (mode == MODE_DHT) allRedOff();
-        }
-        prevStable = stableBtn;
-    }
-    }
-    if (mode == MODE_DHT) {
-        if (currentMillis - lastDhtMs >= DHT_SAMPLE_MS) {
-            lastDhtMs = currentMillis;
-            float h = dht.readHumidity();
-            float t = dht.readTemperature(); // °C
-            if (isnan(h) || isnan(t)) {
-            Serial.println(F("DHT read failed"));
-            } else {
-            Serial.print(F("DHT22 -> T: "));
-            Serial.print(t, 1);
-            Serial.print(F(" °C, H: "));
-            Serial.print(h, 1);
-            Serial.println(F(" %"));
-            }
-        }
-    // Red LEDs off in this mode (already cleared on switch)
-    } else { // MODE_ULTRASONIC
-        if (currentMillis - lastUsMs >= US_SAMPLE_MS) {
-            lastUsMs = currentMillis;
-            long cm = readUltrasonicCM();
-            if (cm >= 0) {
-            Serial.print(F("Distance: "));
-            Serial.print(cm);
-            Serial.println(F(" cm"));
-            } else {
-            Serial.println(F("Distance: out of range / timeout"));
-            }
-            setRedProgress(cm);
-        }
-    }
+   processButtonInput(currentMillis);
+   handleSensorReadings(currentMillis);
 }
